@@ -3,8 +3,44 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { Pool } from "pg";
 import { hashPassword } from "../src/lib/auth/password";
 
-const connectionString = process.env["PG_DATABASE_URL"] ?? process.env["DATABASE_URL"];
-if (!connectionString) throw new Error("PG_DATABASE_URL (or DATABASE_URL) is not set");
+function decodePrismaDevApiKeyToDatabaseUrl(apiKey: string): string | null {
+  try {
+    const json = Buffer.from(apiKey, "base64url").toString("utf8");
+    const parsed = JSON.parse(json);
+    return typeof parsed?.databaseUrl === "string" ? parsed.databaseUrl : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolvePgConnectionString(): string | null {
+  const pgUrl = process.env["PG_DATABASE_URL"];
+  if (pgUrl) return pgUrl;
+
+  const dbUrl = process.env["DATABASE_URL"];
+  if (!dbUrl) return null;
+  if (dbUrl.startsWith("postgres://") || dbUrl.startsWith("postgresql://")) return dbUrl;
+
+  if (dbUrl.startsWith("prisma+postgres://") || dbUrl.startsWith("prisma+postgresql://")) {
+    try {
+      const url = new URL(dbUrl);
+      const apiKey = url.searchParams.get("api_key");
+      if (!apiKey) return null;
+      return decodePrismaDevApiKeyToDatabaseUrl(apiKey);
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+const connectionString = resolvePgConnectionString();
+if (!connectionString) {
+  throw new Error(
+    "No usable Postgres URL found. Set PG_DATABASE_URL (preferred) or use a prisma dev DATABASE_URL with api_key.",
+  );
+}
 
 const prisma = new PrismaClient({
   adapter: new PrismaPg(new Pool({ connectionString })),
@@ -120,4 +156,3 @@ main()
     await prisma.$disconnect();
     process.exit(1);
   });
-

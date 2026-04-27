@@ -79,10 +79,12 @@ export async function POST(request: Request) {
     },
   });
 
-  await prisma.table.update({
+  const updatedTable = await prisma.table.update({
     where: { id: body.tableId },
     data: { status: "OCCUPIED" },
   });
+  // Keep response/realtime payload consistent with DB update.
+  order.table = updatedTable;
 
   // Recipe-based inventory deduction (MVP: direct subtraction).
   // In production: wrap in SERIALIZABLE txn + stock checks.
@@ -115,4 +117,3 @@ export async function POST(request: Request) {
 
   return Response.json({ order });
 }
-
