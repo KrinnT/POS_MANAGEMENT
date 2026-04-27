@@ -4,16 +4,21 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 // --- USER & AUTH ---
 model User {
   id        String   @id @default(uuid())
   phone     String   @unique
+  email     String?  @unique
   role      Role     @default(WAITER)
-  passcode  String?  
+  passcode  String?
+  passwordHash String?
+  branchId  String?
+  branch    Branch?  @relation(fields: [branchId], references: [id])
   orders    Order[]
+  sessions  Session[]
+  auditLogs AuditLog[]
 }
 
 enum Role {
@@ -24,13 +29,63 @@ enum Role {
   CHEF
 }
 
+model Branch {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  address   String?
+  timezone  String   @default("Asia/Ho_Chi_Minh")
+  currency  String   @default("VND")
+  taxRate   Float    @default(0)
+  serviceChargeRate Float @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users     User[]
+  tables    Table[]
+  products  Product[]
+  inventory Inventory[]
+  orders    Order[]
+  auditLogs AuditLog[]
+  sessions  Session[]
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  userId    String
+  branchId  String?
+  jti       String   @unique
+  createdAt DateTime @default(now())
+  revokedAt DateTime?
+  expiresAt DateTime
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  branch    Branch?  @relation(fields: [branchId], references: [id])
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  branchId  String?
+  userId    String?
+  action    String
+  entity    String
+  entityId  String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  branch    Branch?  @relation(fields: [branchId], references: [id])
+  user      User?    @relation(fields: [userId], references: [id])
+}
+
 // --- RESTAURANT & TABLES ---
 model Table {
   id          String   @id @default(uuid())
+  branchId    String
   name        String   
   status      TableStatus @default(AVAILABLE)
   qrToken     String   @unique
   orders      Order[]
+
+  branch      Branch   @relation(fields: [branchId], references: [id])
 }
 
 enum TableStatus {
@@ -41,21 +96,34 @@ enum TableStatus {
 // --- MENU & INVENTORY ---
 model Product {
   id          String   @id @default(uuid())
-  name        String
+  branchId    String
+  name        String   @unique
   price       Float
   category    String   
+  station     KitchenStation @default(HOT)
   isAvailable Boolean  @default(true)
   recipeItems Recipe[]
   orderItems  OrderItem[]
+
+  branch      Branch   @relation(fields: [branchId], references: [id])
+}
+
+enum KitchenStation {
+  HOT
+  COLD
+  BAR
 }
 
 model Inventory {
   id            String   @id @default(uuid())
-  ingredient    String   
+  branchId      String
+  ingredient    String   @unique
   stockQuantity Float
   unit          String   
   minThreshold  Float    
   recipes       Recipe[]
+
+  branch        Branch   @relation(fields: [branchId], references: [id])
 }
 
 model Recipe {
@@ -70,17 +138,66 @@ model Recipe {
 // --- ORDER & PAYMENT ---
 model Order {
   id            String   @id @default(uuid())
+  branchId      String
   tableId       String
   userId        String?  
   status        OrderStatus 
   totalAmount   Float
   paymentStatus PayStatus   
+  paymentMethod PaymentMethod?
+  pricing       Json?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
   
   items         OrderItem[]
   table         Table    @relation(fields: [tableId], references: [id])
   user          User?    @relation(fields: [userId], references: [id])
+  branch        Branch   @relation(fields: [branchId], references: [id])
+
+  payments      Payment[]
+}
+
+enum PaymentProvider {
+  MOMO
+  VNPAY
+}
+
+enum PaymentStatus {
+  INITIATED
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+model Payment {
+  id             String         @id @default(uuid())
+  orderId        String
+  provider       PaymentProvider
+  status         PaymentStatus  @default(INITIATED)
+  amount         Float
+  currency       String         @default("VND")
+  idempotencyKey String         @unique
+  providerRef    String?
+  payUrl         String?
+  qrCode         String?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  order          Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  events         PaymentEvent[]
+}
+
+model PaymentEvent {
+  id          String   @id @default(uuid())
+  paymentId   String?
+  provider    PaymentProvider
+  signatureOk Boolean @default(false)
+  rawBody     String
+  headers     Json?
+  createdAt   DateTime @default(now())
+
+  payment     Payment?  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
 }
 
 enum OrderStatus {
@@ -97,6 +214,15 @@ enum PayStatus {
   PAID
 }
 
+enum PaymentMethod {
+  CASH
+  CARD
+  MOMO
+  VNPAY
+  APPLE_PAY
+  OTHER
+}
+
 model OrderItem {
   id            String   @id @default(uuid())
   orderId       String
@@ -104,6 +230,7 @@ model OrderItem {
   quantity      Int
   modifiers     Json?    
   status        ItemStatus 
+  note          String?
   
   order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
   product       Product  @relation(fields: [productId], references: [id])
