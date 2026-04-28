@@ -11,10 +11,7 @@ export async function POST() {
       const payload = await verifySessionToken(token);
       const jti = payload.jti;
       if (typeof jti === "string") {
-        await prisma.session.updateMany({
-          where: { jti, revokedAt: null },
-          data: { revokedAt: new Date() },
-        });
+        await prisma.session.deleteMany({ where: { jti } });
       }
     } catch {
       // ignore
@@ -23,4 +20,3 @@ export async function POST() {
   await clearSessionCookie();
   return Response.json({ ok: true });
 }
-

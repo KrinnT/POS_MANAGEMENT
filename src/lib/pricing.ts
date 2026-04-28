@@ -1,5 +1,3 @@
-import type { Product } from "@prisma/client";
-
 export type PricingConfig = {
   taxRate: number; // 0.1 = 10%
   serviceChargeRate: number; // 0.05 = 5%
@@ -7,7 +5,7 @@ export type PricingConfig = {
 };
 
 export type Line = {
-  product: Pick<Product, "id" | "name" | "price">;
+  product: { id: string; name: string; price: number };
   quantity: number;
 };
 
@@ -36,4 +34,3 @@ export function computePricing(lines: Line[], cfg: PricingConfig) {
     },
   };
 }
-

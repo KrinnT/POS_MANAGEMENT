@@ -13,7 +13,7 @@ export async function GET(_req: Request, ctx: RouteContext<"/api/orders/[orderId
 
   const order = await prisma.order.findUnique({
     where: { id: orderId },
-    include: { table: true, items: { include: { product: true } } },
+    include: { table: true, items: { include: { variant: { include: { product: true } } } } },
   });
 
   if (!order) return Response.json({ error: "Not found" }, { status: 404 });
@@ -27,7 +27,7 @@ export async function PATCH(request: Request, ctx: RouteContext<"/api/orders/[or
   const order = await prisma.order.update({
     where: { id: orderId },
     data: body as never,
-    include: { table: true, items: { include: { product: true } } },
+    include: { table: true, items: { include: { variant: { include: { product: true } } } } },
   });
 
   // If paid+completed, free table.
@@ -46,4 +46,3 @@ export async function PATCH(request: Request, ctx: RouteContext<"/api/orders/[or
 
   return Response.json({ order });
 }
-

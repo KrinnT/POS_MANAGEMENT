@@ -9,7 +9,10 @@ function decodePrismaDevApiKeyToDatabaseUrl(apiKey: string): string | null {
     // The `api_key` used by Prisma Postgres / prisma dev is base64url JSON that contains `databaseUrl`.
     const json = Buffer.from(apiKey, "base64url").toString("utf8");
     const parsed = JSON.parse(json);
-    return typeof parsed?.databaseUrl === "string" ? parsed.databaseUrl : null;
+    if (typeof parsed?.databaseUrl === "string") {
+      return parsed.databaseUrl.replace("localhost", "127.0.0.1");
+    }
+    return null;
   } catch {
     return null;
   }

@@ -1,23 +1,38 @@
 import { prisma } from "@/lib/db";
 import { getIO } from "@/lib/realtime";
-import { OrderStatus, PayStatus } from "@prisma/client";
-import { computePricing } from "@/lib/pricing";
+import { OrderStatus, PayStatus, ItemStatus } from "@prisma/client";
+import { resolvePrice, calculateTax } from "@/lib/enterprise/pricing";
+import { deductInventory } from "@/lib/enterprise/inventory";
+import { logAudit } from "@/lib/enterprise/audit";
 
 export const runtime = "nodejs";
 
 type CreateOrderBody = {
   tableId: string;
-  items: Array<{ productId: string; quantity: number; note?: string }>;
+  items: Array<{ variantId?: string; productId?: string; quantity: number; note?: string }>;
 };
 
-export async function GET() {
+export async function GET(request: Request) {
+  // Data Isolation: In a real app, we'd get branchId from the session cookie
+  // For this demo, we'll allow fetching all if no branchId is provided, 
+  // but implement the logic structure.
+  const { searchParams } = new URL(request.url);
+  const branchId = searchParams.get("branchId");
+  const tableId = searchParams.get("tableId");
+
   const orders = await prisma.order.findMany({
     where: {
       status: { in: [OrderStatus.PENDING, OrderStatus.PREPARING, OrderStatus.SERVED] },
+      ...(branchId ? { branchId } : {}),
+      ...(tableId ? { tableId } : {}),
     },
     include: {
       table: true,
-      items: { include: { product: true } },
+      items: { 
+        include: { 
+          variant: { include: { product: true } } 
+        } 
+      },
     },
     orderBy: { createdAt: "desc" },
     take: 50,
@@ -38,82 +53,92 @@ export async function POST(request: Request) {
   });
   if (!table) return Response.json({ error: "Table not found" }, { status: 404 });
 
-  const productIds = [...new Set(body.items.map((i) => i.productId))];
-  const products = await prisma.product.findMany({ where: { id: { in: productIds } } });
-  const priceById = new Map(products.map((p) => [p.id, p.price]));
+  const branchId = table.branchId;
+  let subtotal = 0;
+  let totalTax = 0;
+  
+  // Resolve items, prices, and taxes
+  const orderItemsData = [];
+  for (const item of body.items) {
+    if (!item.quantity || item.quantity <= 0) continue;
 
-  const branch = await prisma.branch.findUnique({
-    where: { id: table.branchId },
-    select: { taxRate: true, serviceChargeRate: true },
-  });
-  const lines = body.items.map((i) => {
-    const product = products.find((p) => p.id === i.productId);
-    return { product: { id: i.productId, name: product?.name ?? "Unknown", price: priceById.get(i.productId) ?? 0 }, quantity: i.quantity };
-  });
-  const pricing = computePricing(lines, {
-    taxRate: branch?.taxRate ?? 0,
-    serviceChargeRate: branch?.serviceChargeRate ?? 0,
-    discountRate: 0,
-  });
+    let resolvedVariantId = item.variantId;
+    if (!resolvedVariantId && item.productId) {
+      const firstVariant = await prisma.productVariant.findFirst({
+        where: { productId: item.productId },
+        orderBy: { id: "asc" },
+        select: { id: true },
+      });
+      resolvedVariantId = firstVariant?.id;
+    }
+    if (!resolvedVariantId) continue;
 
+    const variant = await prisma.productVariant.findUnique({
+      where: { id: resolvedVariantId },
+      include: { product: true },
+    });
+    if (!variant) continue;
+
+    const unitPrice = await resolvePrice({ branchId, variantId: variant.id });
+    const itemSubtotal = unitPrice * item.quantity;
+    const itemTax = await calculateTax(branchId, variant.product.taxCategoryId, itemSubtotal);
+
+    subtotal += itemSubtotal;
+    totalTax += itemTax;
+
+    orderItemsData.push({
+      variantId: variant.id,
+      quantity: item.quantity,
+      status: ItemStatus.PENDING,
+      note: item.note,
+    });
+  }
+
+  if (orderItemsData.length === 0) {
+    return Response.json({ error: "No valid order items" }, { status: 400 });
+  }
+
+  const totalAmount = subtotal + totalTax;
+
+  // Create Order
   const order = await prisma.order.create({
     data: {
-      branchId: table.branchId,
+      branchId,
       tableId: body.tableId,
       status: OrderStatus.PENDING,
-      totalAmount: pricing.total,
+      totalAmount,
       paymentStatus: PayStatus.UNPAID,
-      pricing: pricing.snapshot,
+      pricing: { subtotal, totalTax, totalAmount },
       items: {
-        create: body.items.map((i) => ({
-          productId: i.productId,
-          quantity: i.quantity,
-          status: "PENDING",
-          note: i.note,
-        })),
+        create: orderItemsData,
       },
     },
     include: {
       table: true,
-      items: { include: { product: true } },
+      items: { include: { variant: { include: { product: true } } } },
     },
   });
 
-  const updatedTable = await prisma.table.update({
+  // Update table status
+  await prisma.table.update({
     where: { id: body.tableId },
     data: { status: "OCCUPIED" },
   });
-  // Keep response/realtime payload consistent with DB update.
-  order.table = updatedTable;
 
-  // Recipe-based inventory deduction (MVP: direct subtraction).
-  // In production: wrap in SERIALIZABLE txn + stock checks.
-  const recipes = await prisma.recipe.findMany({
-    where: { productId: { in: productIds } },
-  });
-  const recipeByProduct = new Map<string, Array<{ inventoryId: string; amount: number }>>();
-  for (const r of recipes) {
-    recipeByProduct.set(r.productId, [...(recipeByProduct.get(r.productId) ?? []), { inventoryId: r.inventoryId, amount: r.amount }]);
-  }
-  const inventoryDelta = new Map<string, number>();
-  for (const item of body.items) {
-    const rs = recipeByProduct.get(item.productId) ?? [];
-    for (const r of rs) {
-      inventoryDelta.set(r.inventoryId, (inventoryDelta.get(r.inventoryId) ?? 0) + r.amount * item.quantity);
-    }
-  }
-  for (const [inventoryId, delta] of inventoryDelta) {
-    await prisma.inventory.update({
-      where: { id: inventoryId },
-      data: { stockQuantity: { decrement: delta } },
-    });
+  // Enterprise Feature: Recursive Inventory Deduction
+  for (const item of orderItemsData) {
+    await deductInventory(branchId, item.variantId, item.quantity, order.id);
   }
 
+  // Enterprise Feature: Immutable Audit Log
+  await logAudit("CREATE_ORDER", "Order", order.id, { branchId }, null, order);
+
+  // Realtime notification
   const io = getIO();
   io?.emit("order:created", order);
-  io?.to(`branch:${order.branchId}`).emit("order:created", order);
-  io?.to(`table:${order.tableId}`).emit("order:created", order);
-  io?.to(`order:${order.id}`).emit("order:updated", order);
+  io?.to(`branch:${branchId}`).emit("order:created", order);
+  io?.to(`table:${body.tableId}`).emit("order:created", order);
+  io?.to(`order:${order.id}`).emit("order:created", order);
 
   return Response.json({ order });
 }

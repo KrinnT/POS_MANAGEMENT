@@ -36,7 +36,7 @@ export async function POST(request: Request) {
 
   const updated = await prisma.payment.update({
     where: { id: payment.id },
-    data: { payUrl: `/pay/${provider.toLowerCase()}?paymentId=${payment.id}` },
+    data: { payUrl: `/pay?paymentId=${payment.id}&provider=${provider}` },
   });
 
   return Response.json({ payment: updated });

@@ -6,20 +6,377 @@ datasource db {
   provider = "postgresql"
 }
 
-// --- USER & AUTH ---
-model User {
+// --- HIERARCHY & ORGANIZATION ---
+
+model HQ {
   id        String   @id @default(uuid())
-  phone     String   @unique
-  email     String?  @unique
-  role      Role     @default(WAITER)
-  passcode  String?
-  passwordHash String?
-  branchId  String?
-  branch    Branch?  @relation(fields: [branchId], references: [id])
-  orders    Order[]
-  sessions  Session[]
-  auditLogs AuditLog[]
+  name      String   @unique
+  regions   Region[]
+  createdAt DateTime @default(now())
 }
+
+model Region {
+  id        String   @id @default(uuid())
+  hqId      String
+  name      String
+  hq        HQ       @relation(fields: [hqId], references: [id])
+  branches  Branch[]
+  taxRules  TaxRule[]
+  createdAt DateTime @default(now())
+}
+
+model Branch {
+  id                String      @id @default(uuid())
+  regionId          String
+  name              String      @unique
+  address           String?
+  timezone          String      @default("Asia/Ho_Chi_Minh")
+  currency          String      @default("VND")
+  region            Region      @relation(fields: [regionId], references: [id])
+  
+  // Relations
+  users             User[]
+  tables            Table[]
+  priceBooks        PriceBook[]
+  inventoryBalances InventoryBalance[]
+  transactions      InventoryTransaction[]
+  orders            Order[]
+  auditLogs         AuditLog[]
+  promotions        BranchPromotion[]
+
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+}
+
+// --- AUTH & RBAC ---
+
+model User {
+  id           String     @id @default(uuid())
+  phone        String     @unique
+  email        String?    @unique
+  roleId       String
+  passcode     String?
+  passwordHash String?
+  branchId     String?
+  role         UserRole   @relation(fields: [roleId], references: [id])
+  branch       Branch?    @relation(fields: [branchId], references: [id])
+  sessions     Session[]
+  auditLogs    AuditLog[]
+  orders       Order[]
+}
+
+model UserRole {
+  id          String           @id @default(uuid())
+  name        String           @unique // e.g. ADMIN, MANAGER
+  permissions RolePermission[]
+  users       User[]
+}
+
+model Permission {
+  id    String           @id @default(uuid())
+  code  String           @unique // e.g. inventory:write, menu:delete
+  roles RolePermission[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         UserRole   @relation(fields: [roleId], references: [id])
+  permission   Permission @relation(fields: [permissionId], references: [id])
+
+  @@id([roleId, permissionId])
+}
+
+model Session {
+  id        String    @id @default(uuid())
+  userId    String
+  jti       String    @unique
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// --- PRODUCT & MENU (MASTER DATA) ---
+
+model Category {
+  id       String    @id @default(uuid())
+  name     String    @unique
+  products Product[]
+}
+
+model Product {
+  id             String         @id @default(uuid())
+  categoryId     String
+  name           String         @unique
+  description    String?
+  taxCategoryId  String
+  kitchenStation KitchenStation @default(HOT)
+  
+  category       Category       @relation(fields: [categoryId], references: [id])
+  taxCategory    TaxCategory    @relation(fields: [taxCategoryId], references: [id])
+  
+  variants       ProductVariant[]
+  modifierGroups ModifierGroup[]
+  
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+}
+
+model ProductVariant {
+  id        String   @id @default(uuid())
+  productId String
+  sku       String   @unique
+  name      String?  // e.g. "Large", "Iced"
+  product   Product  @relation(fields: [productId], references: [id])
+  
+  priceEntries PriceBookEntry[]
+  bomItems     BOM[]
+  componentOf  BOM[] @relation("RecursiveBOM")
+  orderItems   OrderItem[]
+}
+
+model ModifierGroup {
+  id        String   @id @default(uuid())
+  productId String
+  name      String
+  minSelect Int      @default(0)
+  maxSelect Int      @default(1)
+  product   Product  @relation(fields: [productId], references: [id])
+  options   ModifierOption[]
+}
+
+model ModifierOption {
+  id              String         @id @default(uuid())
+  modifierGroupId String
+  name            String
+  extraPrice      Float          @default(0)
+  materialId      String?        // Link to material for deduction
+  materialAmount  Float?
+  group           ModifierGroup  @relation(fields: [modifierGroupId], references: [id])
+  material        Material?      @relation(fields: [materialId], references: [id])
+}
+
+// Recursive BOM (Bill of Materials)
+model BOM {
+  id               String          @id @default(uuid())
+  variantId        String
+  materialId       String?
+  childVariantId   String?         // For nested products like Combos
+  quantity         Float
+  
+  variant          ProductVariant  @relation(fields: [variantId], references: [id])
+  material         Material?       @relation(fields: [materialId], references: [id])
+  childVariant     ProductVariant? @relation("RecursiveBOM", fields: [childVariantId], references: [id])
+}
+
+// --- PRICING & TAX ---
+
+model PriceBook {
+  id        String           @id @default(uuid())
+  name      String
+  branchId  String?
+  branch    Branch?          @relation(fields: [branchId], references: [id])
+  entries   PriceBookEntry[]
+  isActive  Boolean          @default(true)
+}
+
+model PriceBookEntry {
+  id          String         @id @default(uuid())
+  priceBookId String
+  variantId   String
+  price       Float
+  priceBook   PriceBook      @relation(fields: [priceBookId], references: [id])
+  variant     ProductVariant @relation(fields: [variantId], references: [id])
+
+  @@unique([priceBookId, variantId])
+}
+
+model TaxCategory {
+  id       String    @id @default(uuid())
+  name     String    @unique // e.g. Alcohol, Food, Non-taxable
+  products Product[]
+  rules    TaxRule[]
+}
+
+model TaxRule {
+  id            String      @id @default(uuid())
+  regionId      String
+  taxCategoryId String
+  rate          Float
+  region        Region      @relation(fields: [regionId], references: [id])
+  taxCategory   TaxCategory @relation(fields: [taxCategoryId], references: [id])
+
+  @@unique([regionId, taxCategoryId])
+}
+
+// --- INVENTORY (STATE MACHINE & LEDGER) ---
+
+model Material {
+  id             String           @id @default(uuid())
+  name           String           @unique
+  unit           String           // e.g. grams, ml, pcs
+  modifierOptions ModifierOption[]
+  bomItems       BOM[]
+  stockBatches   StockBatch[]
+  balances       InventoryBalance[]
+  transactions   InventoryTransaction[]
+}
+
+model InventoryBalance {
+  branchId   String
+  materialId String
+  quantity   Float    @default(0)
+  branch     Branch   @relation(fields: [branchId], references: [id])
+  material   Material @relation(fields: [materialId], references: [id])
+
+  @@id([branchId, materialId])
+}
+
+model InventoryTransaction {
+  id            String          @id @default(uuid())
+  branchId      String
+  materialId    String
+  type          TransactionType
+  quantity      Float           // positive for IN, negative for OUT
+  documentId    String?         // Reference to PO, GRN, etc.
+  cost          Float?          // Unit cost at time of transaction
+  userId        String?
+  createdAt     DateTime        @default(now())
+  
+  branch        Branch          @relation(fields: [branchId], references: [id])
+  material      Material        @relation(fields: [materialId], references: [id])
+}
+
+model StockBatch {
+  id            String    @id @default(uuid())
+  materialId    String
+  initialQty    Float
+  remainingQty  Float
+  unitCost      Float
+  expiryDate    DateTime?
+  receivedDate  DateTime  @default(now())
+  material      Material  @relation(fields: [materialId], references: [id])
+}
+
+enum TransactionType {
+  PURCHASE
+  SALE
+  TRANSFER_IN
+  TRANSFER_OUT
+  ADJUSTMENT
+  WASTE
+}
+
+model InventoryDocument {
+  id          String         @id @default(uuid())
+  type        DocumentType
+  status      DocumentStatus @default(DRAFT)
+  fromBranchId String?
+  toBranchId   String?
+  metadata    Json?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+}
+
+enum DocumentType {
+  PO
+  GRN
+  TRANSFER
+  ADJUSTMENT
+}
+
+enum DocumentStatus {
+  DRAFT
+  PENDING
+  IN_TRANSIT
+  COMPLETED
+  CANCELLED
+}
+
+// --- SALES & ORDERS ---
+
+model Table {
+  id       String      @id @default(uuid())
+  branchId String
+  name     String
+  status   TableStatus @default(AVAILABLE)
+  qrToken  String      @unique
+  branch   Branch      @relation(fields: [branchId], references: [id])
+  orders   Order[]
+}
+
+model Order {
+  id            String         @id @default(uuid())
+  branchId      String
+  tableId       String
+  userId        String?
+  status        OrderStatus
+  totalAmount   Float
+  paymentStatus PayStatus
+  paymentMethod PaymentMethod?
+  pricing       Json?          // Snapshot of tax, discount, pricebook used
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  
+  branch        Branch         @relation(fields: [branchId], references: [id])
+  table         Table          @relation(fields: [tableId], references: [id])
+  user          User?          @relation(fields: [userId], references: [id])
+  items         OrderItem[]
+  payments      Payment[]
+}
+
+model OrderItem {
+  id        String         @id @default(uuid())
+  orderId   String
+  variantId String
+  quantity  Int
+  modifiers Json?          // List of ModifierOption IDs
+  status    ItemStatus
+  note      String?
+  order     Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  variant   ProductVariant @relation(fields: [variantId], references: [id])
+}
+
+// --- PROMOTIONS ---
+
+model Promotion {
+  id            String   @id @default(uuid())
+  name          String
+  rules         Json     // Conditions & Actions
+  stackingRule  String   @default("EXCLUSIVE") // EXCLUSIVE, STACKABLE
+  priority      Int      @default(0)
+  startDate     DateTime
+  endDate       DateTime?
+  branches      BranchPromotion[]
+}
+
+model BranchPromotion {
+  branchId    String
+  promotionId String
+  branch      Branch    @relation(fields: [branchId], references: [id])
+  promotion   Promotion @relation(fields: [promotionId], references: [id])
+  @@id([branchId, promotionId])
+}
+
+// --- AUDIT & SYSTEM ---
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  branchId  String?
+  userId    String?
+  action    String
+  entity    String
+  entityId  String?
+  oldValue  Json?
+  newValue  Json?
+  ipAddress String?
+  createdAt DateTime @default(now())
+  
+  branch    Branch?  @relation(fields: [branchId], references: [id])
+  user      User?    @relation(fields: [userId], references: [id])
+}
+
+// --- ENUMS ---
 
 enum Role {
   ADMIN
@@ -29,175 +386,15 @@ enum Role {
   CHEF
 }
 
-model Branch {
-  id        String   @id @default(uuid())
-  name      String   @unique
-  address   String?
-  timezone  String   @default("Asia/Ho_Chi_Minh")
-  currency  String   @default("VND")
-  taxRate   Float    @default(0)
-  serviceChargeRate Float @default(0)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  users     User[]
-  tables    Table[]
-  products  Product[]
-  inventory Inventory[]
-  orders    Order[]
-  auditLogs AuditLog[]
-  sessions  Session[]
-}
-
-model Session {
-  id        String   @id @default(uuid())
-  userId    String
-  branchId  String?
-  jti       String   @unique
-  createdAt DateTime @default(now())
-  revokedAt DateTime?
-  expiresAt DateTime
-
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  branch    Branch?  @relation(fields: [branchId], references: [id])
-}
-
-model AuditLog {
-  id        String   @id @default(uuid())
-  branchId  String?
-  userId    String?
-  action    String
-  entity    String
-  entityId  String?
-  metadata  Json?
-  createdAt DateTime @default(now())
-
-  branch    Branch?  @relation(fields: [branchId], references: [id])
-  user      User?    @relation(fields: [userId], references: [id])
-}
-
-// --- RESTAURANT & TABLES ---
-model Table {
-  id          String   @id @default(uuid())
-  branchId    String
-  name        String   
-  status      TableStatus @default(AVAILABLE)
-  qrToken     String   @unique
-  orders      Order[]
-
-  branch      Branch   @relation(fields: [branchId], references: [id])
-}
-
 enum TableStatus {
   AVAILABLE
   OCCUPIED
-}
-
-// --- MENU & INVENTORY ---
-model Product {
-  id          String   @id @default(uuid())
-  branchId    String
-  name        String   @unique
-  price       Float
-  category    String   
-  station     KitchenStation @default(HOT)
-  isAvailable Boolean  @default(true)
-  recipeItems Recipe[]
-  orderItems  OrderItem[]
-
-  branch      Branch   @relation(fields: [branchId], references: [id])
 }
 
 enum KitchenStation {
   HOT
   COLD
   BAR
-}
-
-model Inventory {
-  id            String   @id @default(uuid())
-  branchId      String
-  ingredient    String   @unique
-  stockQuantity Float
-  unit          String   
-  minThreshold  Float    
-  recipes       Recipe[]
-
-  branch        Branch   @relation(fields: [branchId], references: [id])
-}
-
-model Recipe {
-  productId     String
-  inventoryId   String
-  amount        Float    
-  product       Product   @relation(fields: [productId], references: [id])
-  inventory     Inventory @relation(fields: [inventoryId], references: [id])
-  @@id([productId, inventoryId])
-}
-
-// --- ORDER & PAYMENT ---
-model Order {
-  id            String   @id @default(uuid())
-  branchId      String
-  tableId       String
-  userId        String?  
-  status        OrderStatus 
-  totalAmount   Float
-  paymentStatus PayStatus   
-  paymentMethod PaymentMethod?
-  pricing       Json?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  
-  items         OrderItem[]
-  table         Table    @relation(fields: [tableId], references: [id])
-  user          User?    @relation(fields: [userId], references: [id])
-  branch        Branch   @relation(fields: [branchId], references: [id])
-
-  payments      Payment[]
-}
-
-enum PaymentProvider {
-  MOMO
-  VNPAY
-}
-
-enum PaymentStatus {
-  INITIATED
-  PENDING
-  SUCCEEDED
-  FAILED
-  REFUNDED
-}
-
-model Payment {
-  id             String         @id @default(uuid())
-  orderId        String
-  provider       PaymentProvider
-  status         PaymentStatus  @default(INITIATED)
-  amount         Float
-  currency       String         @default("VND")
-  idempotencyKey String         @unique
-  providerRef    String?
-  payUrl         String?
-  qrCode         String?
-  createdAt      DateTime       @default(now())
-  updatedAt      DateTime       @updatedAt
-
-  order          Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  events         PaymentEvent[]
-}
-
-model PaymentEvent {
-  id          String   @id @default(uuid())
-  paymentId   String?
-  provider    PaymentProvider
-  signatureOk Boolean @default(false)
-  rawBody     String
-  headers     Json?
-  createdAt   DateTime @default(now())
-
-  payment     Payment?  @relation(fields: [paymentId], references: [id], onDelete: Cascade)
 }
 
 enum OrderStatus {
@@ -223,22 +420,50 @@ enum PaymentMethod {
   OTHER
 }
 
-model OrderItem {
-  id            String   @id @default(uuid())
-  orderId       String
-  productId     String
-  quantity      Int
-  modifiers     Json?    
-  status        ItemStatus 
-  note          String?
-  
-  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  product       Product  @relation(fields: [productId], references: [id])
-}
-
 enum ItemStatus {
   PENDING
   PREPARING
   READY
   SERVED
+}
+
+enum PaymentProvider {
+  MOMO
+  VNPAY
+}
+
+enum PaymentStatus {
+  INITIATED
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+model Payment {
+  id             String          @id @default(uuid())
+  orderId        String
+  provider       PaymentProvider
+  status         PaymentStatus   @default(INITIATED)
+  amount         Float
+  currency       String          @default("VND")
+  idempotencyKey String          @unique
+  providerRef    String?
+  payUrl         String?
+  qrCode         String?
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  order          Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  events         PaymentEvent[]
+}
+
+model PaymentEvent {
+  id          String          @id @default(uuid())
+  paymentId   String?
+  provider    PaymentProvider
+  signatureOk Boolean         @default(false)
+  rawBody     String
+  headers     Json?
+  createdAt   DateTime        @default(now())
+  payment     Payment?        @relation(fields: [paymentId], references: [id], onDelete: Cascade)
 }

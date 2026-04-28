@@ -1,22 +1,29 @@
 import { prisma } from "@/lib/db";
-import { getSessionCookie } from "@/lib/auth/cookies";
-import { requireAuth } from "@/lib/auth/session";
-import { can } from "@/lib/auth/rbac";
+import { requirePermission } from "@/lib/auth/guard";
 import { z } from "zod";
 
 export const runtime = "nodejs";
 
 export async function GET() {
-  const token = await getSessionCookie();
-  if (!token) return Response.json({ error: "Unauthorized" }, { status: 401 });
-  const auth = await requireAuth(token);
-  if (!can(auth.role, "inventory.read")) return Response.json({ error: "Forbidden" }, { status: 403 });
+  const guard = await requirePermission("inventory.read");
+  if (!guard.ok) return guard.response;
+  const auth = guard.auth;
   if (!auth.branchId) return Response.json({ error: "Branch not selected" }, { status: 400 });
 
-  const items = await prisma.inventory.findMany({
+  const balances = await prisma.inventoryBalance.findMany({
     where: { branchId: auth.branchId },
-    orderBy: { ingredient: "asc" },
+    include: { material: true },
+    orderBy: { material: { name: "asc" } },
   });
+
+  const items = balances.map(b => ({
+    id: b.materialId,
+    ingredient: b.material.name,
+    stockQuantity: b.quantity,
+    unit: b.material.unit,
+    minThreshold: 0, // Simplified for now
+  }));
+
   return Response.json({ items });
 }
 
@@ -24,34 +31,48 @@ const CreateSchema = z.object({
   ingredient: z.string().min(1),
   stockQuantity: z.number().min(0),
   unit: z.string().min(1),
-  minThreshold: z.number().min(0),
 });
 
 export async function POST(request: Request) {
-  const token = await getSessionCookie();
-  if (!token) return Response.json({ error: "Unauthorized" }, { status: 401 });
-  const auth = await requireAuth(token);
-  if (!can(auth.role, "inventory.write")) return Response.json({ error: "Forbidden" }, { status: 403 });
+  const guard = await requirePermission("inventory.write");
+  if (!guard.ok) return guard.response;
+  const auth = guard.auth;
   if (!auth.branchId) return Response.json({ error: "Branch not selected" }, { status: 400 });
 
   const parsed = CreateSchema.safeParse(await request.json());
   if (!parsed.success) return Response.json({ error: "Invalid payload" }, { status: 400 });
 
-  const item = await prisma.inventory.create({
-    data: { ...parsed.data, branchId: auth.branchId },
+  // 1. Create or get Material
+  const material = await prisma.material.upsert({
+    where: { name: parsed.data.ingredient },
+    update: { unit: parsed.data.unit },
+    create: { name: parsed.data.ingredient, unit: parsed.data.unit },
+  });
+
+  // 2. Create or update Balance
+  const balance = await prisma.inventoryBalance.upsert({
+    where: { branchId_materialId: { branchId: auth.branchId, materialId: material.id } },
+    update: { quantity: parsed.data.stockQuantity },
+    create: { branchId: auth.branchId, materialId: material.id, quantity: parsed.data.stockQuantity },
   });
 
   await prisma.auditLog.create({
     data: {
       branchId: auth.branchId,
       userId: auth.userId,
-      action: "inventory.create",
-      entity: "Inventory",
-      entityId: item.id,
-      metadata: { ingredient: item.ingredient },
+      action: "inventory.update",
+      entity: "InventoryBalance",
+      entityId: material.id,
+      newValue: { quantity: balance.quantity },
     },
   });
 
-  return Response.json({ item });
+  return Response.json({ 
+    item: {
+      id: material.id,
+      ingredient: material.name,
+      stockQuantity: balance.quantity,
+      unit: material.unit
+    }
+  });
 }
-

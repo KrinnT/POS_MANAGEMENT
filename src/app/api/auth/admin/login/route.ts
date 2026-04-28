@@ -3,6 +3,8 @@ import { z } from "zod";
 import { verifyPassword } from "@/lib/auth/password";
 import { signSessionToken } from "@/lib/auth/jwt";
 import { setSessionCookie } from "@/lib/auth/cookies";
+import { canLoginAdminChannel, isBranchScopeAllowed } from "@/lib/auth/policy";
+import { parseRole } from "@/lib/auth/roles";
 
 export const runtime = "nodejs";
 
@@ -17,26 +19,35 @@ export async function POST(request: Request) {
   if (!parsed.success) return Response.json({ error: "Invalid payload" }, { status: 400 });
 
   const { email, password, branchId } = parsed.data;
-  const user = await prisma.user.findUnique({ where: { email } });
-  if (!user?.passwordHash) return Response.json({ error: "Invalid credentials" }, { status: 401 });
+  const user = await prisma.user.findUnique({ 
+    where: { email },
+    include: { role: true }
+  });
+  if (!user?.passwordHash || !user.role) return Response.json({ error: "Invalid credentials" }, { status: 401 });
 
   const ok = await verifyPassword(password, user.passwordHash);
   if (!ok) return Response.json({ error: "Invalid credentials" }, { status: 401 });
+  const role = parseRole(user.role.name);
+  if (!role) return Response.json({ error: "Invalid role" }, { status: 403 });
+  if (!canLoginAdminChannel(role)) return Response.json({ error: "Forbidden" }, { status: 403 });
+  if (!isBranchScopeAllowed({ userBranchId: user.branchId ?? null, requestedBranchId: branchId ?? null })) {
+    return Response.json({ error: "Branch access denied" }, { status: 403 });
+  }
 
   const jti = crypto.randomUUID();
   const expiresInSeconds = 60 * 60 * 12; // 12h
   const expiresAt = new Date(Date.now() + expiresInSeconds * 1000);
+  const resolvedBranchId = (branchId ?? user.branchId ?? null) as string | null;
 
   await prisma.session.create({
-    data: { userId: user.id, branchId: branchId ?? user.branchId ?? null, jti, expiresAt },
+    data: { userId: user.id, jti, expiresAt },
   });
 
   const token = await signSessionToken(
-    { sub: user.id, jti, branchId: (branchId ?? user.branchId ?? null) as string | null, role: user.role },
+    { sub: user.id, jti, branchId: resolvedBranchId, role },
     expiresInSeconds,
   );
 
   await setSessionCookie(token, expiresInSeconds);
   return Response.json({ ok: true });
 }
-

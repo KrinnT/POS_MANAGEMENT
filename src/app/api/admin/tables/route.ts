@@ -1,16 +1,13 @@
 import { prisma } from "@/lib/db";
-import { getSessionCookie } from "@/lib/auth/cookies";
-import { requireAuth } from "@/lib/auth/session";
-import { can } from "@/lib/auth/rbac";
+import { requirePermission } from "@/lib/auth/guard";
 import { z } from "zod";
 
 export const runtime = "nodejs";
 
 export async function GET() {
-  const token = await getSessionCookie();
-  if (!token) return Response.json({ error: "Unauthorized" }, { status: 401 });
-  const auth = await requireAuth(token);
-  if (!can(auth.role, "table.read")) return Response.json({ error: "Forbidden" }, { status: 403 });
+  const guard = await requirePermission("table.read");
+  if (!guard.ok) return guard.response;
+  const auth = guard.auth;
   if (!auth.branchId) return Response.json({ error: "Branch not selected" }, { status: 400 });
 
   const tables = await prisma.table.findMany({
@@ -26,10 +23,9 @@ const CreateSchema = z.object({
 });
 
 export async function POST(request: Request) {
-  const token = await getSessionCookie();
-  if (!token) return Response.json({ error: "Unauthorized" }, { status: 401 });
-  const auth = await requireAuth(token);
-  if (!can(auth.role, "table.write")) return Response.json({ error: "Forbidden" }, { status: 403 });
+  const guard = await requirePermission("table.write");
+  if (!guard.ok) return guard.response;
+  const auth = guard.auth;
   if (!auth.branchId) return Response.json({ error: "Branch not selected" }, { status: 400 });
 
   const parsed = CreateSchema.safeParse(await request.json());
@@ -46,10 +42,9 @@ export async function POST(request: Request) {
       action: "table.create",
       entity: "Table",
       entityId: table.id,
-      metadata: { name: table.name, qrToken: table.qrToken },
+      newValue: { name: table.name, qrToken: table.qrToken },
     },
   });
 
   return Response.json({ table });
 }
-

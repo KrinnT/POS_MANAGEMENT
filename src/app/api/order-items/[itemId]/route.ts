@@ -15,7 +15,7 @@ export async function PATCH(request: Request, ctx: RouteContext<"/api/order-item
   const item = await prisma.orderItem.update({
     where: { id: itemId },
     data: { status: body.status },
-    include: { order: true, product: true },
+    include: { order: true, variant: { include: { product: true } } },
   });
 
   // Best-effort order status rollup
@@ -34,7 +34,7 @@ export async function PATCH(request: Request, ctx: RouteContext<"/api/order-item
   const order = await prisma.order.update({
     where: { id: item.orderId },
     data: { status: nextOrderStatus },
-    include: { table: true, items: { include: { product: true } } },
+    include: { table: true, items: { include: { variant: { include: { product: true } } } } },
   });
 
   const io = getIO();
@@ -45,4 +45,3 @@ export async function PATCH(request: Request, ctx: RouteContext<"/api/order-item
 
   return Response.json({ item, order });
 }
-

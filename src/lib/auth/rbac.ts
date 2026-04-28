@@ -16,7 +16,7 @@ export type Permission =
   | "staff.write"
   | "report.read";
 
-const rolePermissions: Record<Role, Permission[]> = {
+const rolePermissions: Record<Role, readonly Permission[]> = {
   ADMIN: [
     "admin.read",
     "admin.write",
@@ -50,9 +50,20 @@ const rolePermissions: Record<Role, Permission[]> = {
   CASHIER: ["menu.read", "table.read", "order.read", "order.write", "inventory.read", "report.read"],
   WAITER: ["menu.read", "table.read", "order.read", "order.write"],
   CHEF: ["order.read", "order.write"],
+} as const;
+
+const rolePermissionSets: Record<Role, ReadonlySet<Permission>> = {
+  ADMIN: new Set(rolePermissions.ADMIN),
+  MANAGER: new Set(rolePermissions.MANAGER),
+  CASHIER: new Set(rolePermissions.CASHIER),
+  WAITER: new Set(rolePermissions.WAITER),
+  CHEF: new Set(rolePermissions.CHEF),
 };
 
 export function can(role: Role, permission: Permission) {
-  return rolePermissions[role].includes(permission);
+  return rolePermissionSets[role].has(permission);
 }
 
+export function listPermissions(role: Role): Permission[] {
+  return [...rolePermissionSets[role]];
+}
